@@ -11,6 +11,7 @@ from src.Move import Move
 docker run --cpus=8 --memory=8G -v ${PWD}:/home/hex --name hex --rm -it hex /bin/bash
 python3 Hex.py
 python3 -m unittest discover
+python3 Hex.py -p1 "agents.Group23.NaiveAgent NaiveAgent"
 """
 
 
