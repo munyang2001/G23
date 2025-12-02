@@ -8,6 +8,14 @@ from src.Colour import Colour
 from src.Move import Move
 from agents.Group23.board_set import Board_Optimized
 
+class SearchParams:
+    def __init__(self):
+        self.fpu_reduction = 0.2
+        # UCT Exploration Constant (sqrt(2) is standard for UCT)
+        self.C = math.sqrt(2)
+        # RAVE Constant (Controls how much we trust RAVE vs Real stats)
+        self.rave_constant = 300 
+
 class Node:
     __slots__ = ['parent', 'move', 'player', 'visits', 'wins',
                  'rave_visits', 'rave_wins', 'children', 'allowed_moves']
@@ -29,10 +37,14 @@ class Node:
     def has_children(self):
         return len(self.children) > 0
 
+    def value(self):
+        if self.visits == 0:
+            return 0.0
+        return self.wins / self.visits
+
 class MCTS:
     def __init__(self):
-        self._C = math.sqrt(2)
-        self._RAVE = 300
+        self.params = SearchParams()
         self.root = Node(parent=None, move=None, player=None)
         self.transposition_table = {}
 
@@ -42,6 +54,7 @@ class MCTS:
             self.root.parent = None
         else:
             self.root = Node(parent=None, move=None, player=None)
+            self.transposition_table.clear()
 
     def selection(self, board, color, time_limit):
         time_start = time.time()
@@ -52,23 +65,24 @@ class MCTS:
                 self.transposition_table[board.hash] = self.root
 
         if self.root.player is None:
-            if color == Colour.RED:
-                self.root.player = 1 
-            else:
-                self.root.player = False
+            self.root.player = 1 if color == Colour.RED else 2
 
         while time.time() - time_start < time_limit:
             node = self.root
             board_copy = board.copy()
             path = [node]
-            path_set = {id(node)}
+            path_set = {id(node)} # Cycle detection
             cycle_detected = False
+            
+            # Track moves for RAVE updates
             red_moves = set()
             blue_moves = set()
 
+            # 1. Selection (Hybrid RAVE + FPU)
             while node.is_fully_expanded() and node.has_children():
                 node = self.child_selection(node)
                 
+                # Cycle Check
                 if id(node) in path_set:
                     cycle_detected = True
                     break
@@ -88,6 +102,7 @@ class MCTS:
             if cycle_detected:
                 continue
 
+            # 2. Expansion
             if node.allowed_moves and board_copy.winner is None:
                 move_to_expand = node.allowed_moves.pop()
                 next_player = 1 if node.player is None and color == Colour.RED else (3 - (node.player or 2))
@@ -112,7 +127,10 @@ class MCTS:
             else:
                 rollout_player = 1 if (node.player is None and color == Colour.RED) else 3 - node.player
 
+            # 3. Rollout
             winner = self.rollout(board_copy, rollout_player, red_moves, blue_moves)
+            
+            # 4. Backpropagation (RAVE)
             self.backpropagate(path, winner, red_moves, blue_moves)
 
         best_child = max(self.root.children.values(), key=lambda c: c.visits, default=None)
@@ -123,22 +141,40 @@ class MCTS:
     def child_selection(self, node):
         best_score = -float('inf')
         best_node = None
+        
+        # Avoid log(0)
         log_visits = math.log(node.visits) if node.visits > 0 else 0
+        
+        # FPU Calculation
+        # Assume unvisited nodes are slightly worse than parent average
+        fpu_value = 0.0
+        if node.visits > 0:
+            fpu_value = node.value() - self.params.fpu_reduction
 
         for child in node.children.values():
+            # HYBRID LOGIC:
             if child.visits == 0:
-                return child
+                # FPU for unvisited: 
+                # We give it a score so it competes with visited nodes.
+                # We treat it as having "high uncertainty" (like UCT with n=1)
+                exploitation = fpu_value
+                exploration = self.params.C * math.sqrt(log_visits) # n=1 approx
+            else:
+                # RAVE Logic for visited
+                beta = math.sqrt(self.params.rave_constant / (3 * node.visits + self.params.rave_constant))
+                
+                rave_exploitation = child.rave_wins / child.rave_visits if child.rave_visits > 0 else 0
+                uct_exploitation = child.wins / child.visits
+                
+                exploitation = (1 - beta) * uct_exploitation + beta * rave_exploitation
+                exploration = self.params.C * math.sqrt(log_visits / child.visits)
             
-            beta = math.sqrt(self._RAVE / (3 * node.visits + self._RAVE))
-            rave_exploitation = child.rave_wins / child.rave_visits if child.rave_visits > 0 else 0
-            uct_exploitation = child.wins / child.visits
-            exploitation = (1 - beta) * uct_exploitation + beta * rave_exploitation
-            exploration = self._C * math.sqrt(log_visits / child.visits)
             score = exploitation + exploration
             
             if score > best_score:
                 best_score = score
                 best_node = child
+        
         return best_node
 
     def rollout(self, board, next_player, red_moves, blue_moves):
@@ -161,11 +197,12 @@ class MCTS:
         
         for node in reversed(path):
             current_player = Colour.RED if node.player == 1 else Colour.BLUE
-            reward = 1 if winner == current_player else -1
+            reward = 1 if winner == current_player else 0 # 1 or 0 for UCT/RAVE
             
             node.visits += 1
             node.wins += reward
             
+            # RAVE Update
             for child in node.children.values():
                 child_color = Colour.RED if child.player == 1 else Colour.BLUE
                 if child.move in moves_by_color[child_color]:

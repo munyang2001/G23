@@ -1,1 +1,1 @@
-agents.Group23.NaiveAgent NaiveAgent
+agents.Group23.NaiveAgent Agent
