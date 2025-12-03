@@ -30,6 +30,7 @@ class UnionFind:
 
 #Weights
 weight_shortest_path = 10
+weight_opponent_block = 7
 weight_connectivity = 3
 weight_bridge = 5
 weight_dead_cell = -50
@@ -182,18 +183,82 @@ def is_bridge_move(board:Board, colour: Colour, x: int, y: int) -> bool:
 
 # Dead cell detection
 def is_dead_cell(board: Board, colour: Colour, x: int, y: int) -> bool:
-    return False
+    size = board.size
+    opponent = Colour.opposite(colour)
+
+    def bfs_reaches_side(side: str) -> bool:
+        visited = []
+        for i in range(size):
+            row = []
+            for j in range(size):
+                row.append(False)
+            visited.append(row)
+
+        dq = deque()
+        dq.append((x, y))
+        visited[x][y] = True
+
+        while dq:
+            cell_x, cell_y = dq.popleft()
+
+            if colour == Colour.RED:
+                if side == "top" and cell_x == 0:
+                    return True
+                if side == "bottom" and cell_x == size - 1:
+                    return True
+            else:
+                if side == "left" and cell_y == 0:
+                    return True
+                if side == "right" and cell_y == size - 1:
+                    return True
+            
+            for k in range(Tile.NEIGHBOUR_COUNT):
+                neighbour_x = cell_x + Tile.I_DISPLACEMENTS[k]
+                neighbour_y = cell_y + Tile.J_DISPLACEMENTS[k]
+
+                if 0 <= neighbour_x < size and 0 <= neighbour_y < size:
+                    if not visited[neighbour_x][neighbour_y]:
+                        if board.tiles[neighbour_x][neighbour_y].colour != opponent:
+                            visited[neighbour_x][neighbour_y] = True
+                            dq.append((neighbour_x, neighbour_y))
+        return False
+    
+    if colour == Colour.RED:
+        reach_top = bfs_reaches_side("top")
+        reach_bottom = bfs_reaches_side("bottom")
+
+        if reach_top and reach_bottom:
+            return False
+        else:
+            return True
+    else:
+        reach_left = bfs_reaches_side("left")
+        reach_right = bfs_reaches_side("right")
+
+        if reach_left and reach_right:
+            return False
+        else:
+            return True
 
 # Combined score of all heuristics
 def heuristic_scoring(board:Board, colour: Colour, x: int, y: int) -> float:
     score = 0
 
-    #shortest path improvement 
+    # shortest path improvement 
     old = shortest_path_length(board, colour)
     board.set_tile_colour(x, y, colour)
     new = shortest_path_length(board, colour)
     board.set_tile_colour(x, y, None)
     score += (old - new) * weight_shortest_path
+
+    # opponent shortest path block
+    opponent = Colour.opposite(colour)
+    if opponent is not None:
+        opponent_old = shortest_path_length(board, opponent)
+        board.set_tile_colour(x, y, colour)
+        opponent_new = shortest_path_length(board, opponent)
+        board.set_tile_colour(x, y, None)
+        score += (opponent_new - opponent_old) * weight_opponent_block
 
     # connectivity
     score += connectivity_score(board, colour, x, y) * weight_connectivity
