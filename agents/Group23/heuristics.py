@@ -34,6 +34,13 @@ weight_opponent_block = 7
 weight_connectivity = 3
 weight_bridge = 5
 weight_dead_cell = -50
+weight_edge_bias = 1
+weight_center_bias = 0.5
+weight_local_friendly = 0.5
+
+turns_for_edge_bias = 15
+turns_for_center_bias = 10
+turns_for_local_friendly = 20
 
 # Shortest path
 def shortest_path_length(board: Board, colour: Colour) -> int:
@@ -240,9 +247,38 @@ def is_dead_cell(board: Board, colour: Colour, x: int, y: int) -> bool:
         else:
             return True
 
+def edge_bias(x: int, y: int, size: int):
+    if x == 0 or x == size - 1 or y == 0 or y == size - 1:
+        return weight_edge_bias
+    return 0
+
+def center_bias(x: int, y: int, size: int) -> float:
+    mid = size // 2
+    dist = abs(x - mid) + abs(y - mid)
+    max_dist = 2 * mid
+    return (max_dist - dist) / max_dist
+
+def local_friendly_adjacency(board: Board, colour: Colour, x: int, y: int) -> int:
+    count = 0
+    for k in range(Tile.NEIGHBOUR_COUNT):
+        neighbour_x = x + Tile.I_DISPLACEMENTS[k]
+        neighbour_y = y + Tile.J_DISPLACEMENTS[k]
+        if 0 <= neighbour_x < board.size and 0 <= neighbour_y < board.size:
+            if board.tiles[neighbour_x][neighbour_y].colour == colour:
+                count += 1
+    return count
+
 # Combined score of all heuristics
-def heuristic_scoring(board:Board, colour: Colour, x: int, y: int) -> float:
-    score = 0
+def heuristic_scoring(board:Board, colour: Colour, x: int, y: int, turn: int) -> float:
+    score = 0 
+
+    # bias to influence early game move decisions
+    if turn < turns_for_edge_bias:
+        score += edge_bias(x, y, board.size) * weight_edge_bias
+    if turn < turns_for_center_bias:
+        score += center_bias(x, y, board.size) * weight_center_bias
+    if turn < turns_for_local_friendly:
+        score += local_friendly_adjacency(board, colour, x, y) * weight_local_friendly
 
     # shortest path improvement 
     old = shortest_path_length(board, colour)
