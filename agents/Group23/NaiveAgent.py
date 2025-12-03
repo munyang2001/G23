@@ -42,6 +42,7 @@ class MCTS:
             self.root.parent = None
         else:
             self.root = Node(parent=None, move=None, player=None)
+            self.transposition_table.clear()
 
     def selection(self, board, color, time_limit):
         time_start = time.time()
@@ -55,45 +56,42 @@ class MCTS:
             if color == Colour.RED:
                 self.root.player = 1 
             else:
-                self.root.player = False
+                self.root.player = 2 
 
         while time.time() - time_start < time_limit:
             node = self.root
             board_copy = board.copy()
             path = [node]
-            path_set = {id(node)}
-            cycle_detected = False
+            
             red_moves = set()
             blue_moves = set()
 
             while node.is_fully_expanded() and node.has_children():
                 node = self.child_selection(node)
-                
-                if id(node) in path_set:
-                    cycle_detected = True
-                    break
-                
                 path.append(node)
-                path_set.add(id(node))
+                
                 
                 move_row, move_col = node.move
-                move_color = Colour.RED if node.player == 1 else Colour.BLUE
-                board_copy.play(move_row, move_col, move_color)
+                mover_id = node.parent.player
+                if mover_id == 1:
+                    move_colour = Colour.RED
+                else:
+                    move_colour = Colour.BLUE 
+                board_copy.play(move_row, move_col, move_colour)
                 
-                if node.player == 1:
+                if mover_id == 1:
                     red_moves.add(node.move)
                 else:
                     blue_moves.add(node.move)
 
-            if cycle_detected:
-                continue
-
+    
             if node.allowed_moves and board_copy.winner is None:
                 move_to_expand = node.allowed_moves.pop()
-                next_player = 1 if node.player is None and color == Colour.RED else (3 - (node.player or 2))
-                next_color = Colour.RED if next_player == 1 else Colour.BLUE
+                current_player_id = node.player
+                next_player = 3 - current_player_id
+                move_color = Colour.RED if current_player_id == 1 else Colour.BLUE
                 
-                board_copy.play(move_to_expand[0], move_to_expand[1], next_color)
+                board_copy.play(move_to_expand[0], move_to_expand[1], move_color)
                 board_hash = board_copy.hash
 
                 if board_hash in self.transposition_table:
@@ -103,14 +101,21 @@ class MCTS:
                 else:
                     child_node = Node(parent=node, move=move_to_expand, player=next_player)
                     child_node.allowed_moves = board_copy.get_legal_moves()
+                    random.shuffle(child_node.allowed_moves)
                     self.transposition_table[board_hash] = child_node
                     node.children[move_to_expand] = child_node
 
                 node = child_node
                 path.append(node)
-                rollout_player = 2 if next_player == 1 else 1
+                
+                if move_color == Colour.RED:
+                    red_moves.add(move_to_expand)
+                else:
+                    blue_moves.add(move_to_expand)
+                
+                rollout_player = next_player
             else:
-                rollout_player = 1 if (node.player is None and color == Colour.RED) else 3 - node.player
+                rollout_player = node.player
 
             winner = self.rollout(board_copy, rollout_player, red_moves, blue_moves)
             self.backpropagate(path, winner, red_moves, blue_moves)
@@ -130,8 +135,10 @@ class MCTS:
                 return child
             
             beta = math.sqrt(self._RAVE / (3 * node.visits + self._RAVE))
+            
             rave_exploitation = child.rave_wins / child.rave_visits if child.rave_visits > 0 else 0
             uct_exploitation = child.wins / child.visits
+            
             exploitation = (1 - beta) * uct_exploitation + beta * rave_exploitation
             exploration = self._C * math.sqrt(log_visits / child.visits)
             score = exploitation + exploration
@@ -143,7 +150,7 @@ class MCTS:
 
     def rollout(self, board, next_player, red_moves, blue_moves):
         current_player = next_player
-        moves = board.get_legal_moves().copy()
+        moves = board.get_legal_moves()
         random.shuffle(moves)
         while moves and board.winner is None:
             move = moves.pop()
@@ -160,19 +167,29 @@ class MCTS:
         moves_by_color = {Colour.RED: red_moves, Colour.BLUE: blue_moves}
         
         for node in reversed(path):
-            current_player = Colour.RED if node.player == 1 else Colour.BLUE
-            reward = 1 if winner == current_player else -1
+            if node.parent is None:
+                node.visits += 1
+                continue
+
+            mover_id = node.parent.player
+            mover_color = Colour.RED if mover_id == 1 else Colour.BLUE
             
+            
+            reward = 1 if winner == mover_color else -1
             node.visits += 1
             node.wins += reward
             
+            
             for child in node.children.values():
-                child_color = Colour.RED if child.player == 1 else Colour.BLUE
-                if child.move in moves_by_color[child_color]:
+                child_mover_id = node.player
+                child_mover_color = Colour.RED if child_mover_id == 1 else Colour.BLUE
+                
+                if child.move in moves_by_color[child_mover_color]:
                     child.rave_visits += 1
-                    if winner == child_color:
+                    if winner == child_mover_color:
                         child.rave_wins += 1
-
+                    else:
+                        child.rave_wins -= 1
 class Agent(AgentBase):
     _board_size: int = 11
 
@@ -184,19 +201,13 @@ class Agent(AgentBase):
         return Agent(self.colour)
 
     def make_move(self, turn: int, board: Board, opp_move: Move | None) -> Move:
-        if turn == 2:
-            opp_r, opp_c = -1, -1
-            for r in range(self._board_size):
-                for c in range(self._board_size):
-                    if board.tiles[r][c].colour is not None:
-                        opp_r, opp_c = r, c
-            if 2 <= opp_r <= 8 and 2 <= opp_c <= 8:
-                return Move(-1, -1)
-
         if opp_move is not None:
             opp_move_tuple = (opp_move._x, opp_move._y)
             self.mcts.update_root(opp_move_tuple)
-
+        
+        if turn == 2:
+            if 2 <= opp_move._x <= 8 and 2 <= opp_move._y <= 8:
+                return Move(-1, -1)
         optimized_board = Board_Optimized.from_game_board(board, self.colour)
         row, col = self.mcts.selection(optimized_board, self.colour, time_limit=8.5)
         my_move_tuple = (row, col)
