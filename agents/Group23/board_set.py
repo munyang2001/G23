@@ -151,6 +151,37 @@ class Board_Optimized:
 
         self.turn = Colour.BLUE if self.turn == Colour.RED else Colour.RED
         return True
+    
+    def play_rollout(self, row, col, colour):
+        """
+        A stripped-down play function just for random simulations.
+        Removes hashing, turn flipping, and set updates to run faster.
+        """
+        colour_int = self.RED_INT if colour == Colour.RED else self.BLUE_INT
+        self.grid[row, col] = colour_int
+        
+        current = self._index(row, col)
+        
+        # Fast Union-Find update
+        for k in range(Tile.NEIGHBOUR_COUNT):
+            nr = row + Tile.I_DISPLACEMENTS[k]
+            nc = col + Tile.J_DISPLACEMENTS[k]
+            if 0 <= nr < 11 and 0 <= nc < 11:
+                if self.grid[nr, nc] == colour_int:
+                    neighbor = self._index(nr, nc)
+                    self.union(current, neighbor)
+
+        # Fast Winner Check
+        if colour == Colour.RED:
+            if row == 0: self.union(current, self.TOP_RED)
+            if row == 10: self.union(current, self.BOTTOM_RED)
+            if self.find(self.TOP_RED) == self.find(self.BOTTOM_RED):
+                self.winner = Colour.RED
+        else:
+            if col == 0: self.union(current, self.LEFT_BLUE)
+            if col == 10: self.union(current, self.RIGHT_BLUE)
+            if self.find(self.LEFT_BLUE) == self.find(self.RIGHT_BLUE):
+                self.winner = Colour.BLUE    
 
     def get_legal_moves(self):
         return list(self.empty_spots)
