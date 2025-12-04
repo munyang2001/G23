@@ -1,72 +1,57 @@
 import numpy as np
+import random
 from src.Colour import Colour
 from src.Tile import Tile
-import random
-#import kata_hex_board as kb
 
-random.seed(1)
-
-ZOBRIST_TABLE = [
-    [[random.getrandbits(128) for _ in range(2)] for _ in range(11)]
-    for _ in range(11)
-]
-
-TURN_HASH = random.getrandbits(128)
-
-random.seed()
-
+ZOBRIST_TABLE = [[[random.getrandbits(64) for _ in range(2)] for _ in range(11)] for _ in range(11)]
+TURN_HASH = random.getrandbits(64)
 
 class Board_Optimized:
     RED_INT = 1
     BLUE_INT = 2
     EMPTY = 0
 
-    def __init__(self, player, size=11):
-        self.size = size
+    def __init__(self, player, skip_hash_init=False):
         self.turn = player
-        self.grid = np.zeros((size, size), dtype=int)
-        self.empty_spots = [(r, c) for r in range(self.size) for c in range(self.size)]
+        self.grid = np.zeros((11, 11), dtype=int)
+        self.empty_spots = set((r, c) for r in range(11) for c in range(11))
         self.winner = None
 
-        self.parent = np.arange(size * size + 4)
-        self.rank = np.zeros(size * size + 4, dtype=int)
+        self._dsu_size = 125 
+        self.parent = np.arange(self._dsu_size)
+        self.rank = np.zeros(self._dsu_size, dtype=int)
 
-        self.TOP_RED = size * size
-        self.BOTTOM_RED = size * size + 1
-        self.LEFT_BLUE = size * size + 2
-        self.RIGHT_BLUE = size * size + 3
+        self.TOP_RED = 121
+        self.BOTTOM_RED = 122
+        self.LEFT_BLUE = 123
+        self.RIGHT_BLUE = 124
+
         self.hash = 0
-        if player == Colour.RED:
+        if not skip_hash_init and player == Colour.RED:
             self.hash ^= TURN_HASH
 
-    @staticmethod
-    def from_game_board(heavy_board, player):
-        opt_board = Board_Optimized(player, heavy_board.size)
-        for r in range(heavy_board.size):
-            for c in range(heavy_board.size):
-                tile = heavy_board.tiles[r][c]
-                if tile.colour == Colour.RED:
-                    opt_board.play(r, c, Colour.RED)
-                elif tile.colour == Colour.BLUE:
-                    opt_board.play(r, c, Colour.BLUE)
-        if player == Colour.RED:
-            target_turn = 1
-        else:
-            target_turn = 2
-        
-        if opt_board.turn != target_turn:
-            opt_board.hash ^= TURN_HASH
-            opt_board.turn = target_turn
-             
-        return opt_board
+    @classmethod
+    def with_seed(cls, seed, player):
+        random.seed(seed)
+        global ZOBRIST_TABLE, TURN_HASH
+        ZOBRIST_TABLE = [[[random.getrandbits(64) for _ in range(2)] for _ in range(11)] for _ in range(11)]
+        TURN_HASH = random.getrandbits(64)
+        return cls(player)
 
     def _index(self, row, col):
-        return row * self.size + col
+        return row * 11 + col
 
     def find(self, i):
-        if self.parent[i] != i:
-            self.parent[i] = self.find(self.parent[i])
-        return self.parent[i]
+        root = i
+        while self.parent[root] != root:
+            root = self.parent[root]
+        
+        curr = i
+        while curr != root:
+            nxt = self.parent[curr]
+            self.parent[curr] = root
+            curr = nxt
+        return root
 
     def union(self, i, j):
         ri = self.find(i)
@@ -81,68 +66,123 @@ class Board_Optimized:
             self.parent[rj] = ri
             self.rank[ri] += 1
 
-    def play(self, row, col, colour):
-        if self.grid[row, col] != self.EMPTY:
-            return 
-        colour_int = 0
-        if colour == Colour.RED:
-            colour_int = self.RED_INT
-        else:
-            colour_int = self.BLUE_INT
-            
-        self.grid[row, col] = colour_int
+    @classmethod
+    def from_game_board(cls, heavy_board, player):
+        b = cls(player, skip_hash_init=True)
+        for r in range(11):
+            for c in range(11):
+                tile = heavy_board.tiles[r][c]
+                if tile.colour == Colour.RED:
+                    b._place_direct(r, c, Colour.RED)
+                elif tile.colour == Colour.BLUE:
+                    b._place_direct(r, c, Colour.BLUE)
+        if player == Colour.RED:
+            b.hash ^= TURN_HASH
+        return b
 
+    def _place_direct(self, row, col, colour):
+        colour_int = self.RED_INT if colour == Colour.RED else self.BLUE_INT
+        self.grid[row, col] = colour_int
+        
         if (row, col) in self.empty_spots:
             self.empty_spots.remove((row, col))
-        current = self._index(row, col)
-
-        hash_id = 0
-        if colour == Colour.RED:
-            hash_id = 0 
-        else:
-            hash_id = 1
             
+        current = self._index(row, col)
+        hash_id = 0 if colour == Colour.RED else 1
         self.hash ^= ZOBRIST_TABLE[row][col][hash_id]
-        self.hash ^= TURN_HASH
-        
-        self.turn = self.BLUE_INT if self.turn == self.RED_INT else self.RED_INT
 
         for k in range(Tile.NEIGHBOUR_COUNT):
             nr = row + Tile.I_DISPLACEMENTS[k]
             nc = col + Tile.J_DISPLACEMENTS[k]
-            if 0 <= nr < self.size and 0 <= nc < self.size:
+            if 0 <= nr < 11 and 0 <= nc < 11:
                 if self.grid[nr, nc] == colour_int:
                     neighbor = self._index(nr, nc)
                     self.union(current, neighbor)
 
         if colour == Colour.RED:
-            if row == 0: 
-                self.union(current, self.TOP_RED)
-            if row == self.size - 1: 
-                self.union(current, self.BOTTOM_RED)
+            if row == 0: self.union(current, self.TOP_RED)
+            if row == 10: self.union(current, self.BOTTOM_RED)
             if self.find(self.TOP_RED) == self.find(self.BOTTOM_RED):
                 self.winner = Colour.RED
 
-        if colour == Colour.BLUE:
-            if col == 0: 
-                self.union(current, self.LEFT_BLUE)
-            if col == self.size - 1: 
-                self.union(current, self.RIGHT_BLUE)
+        elif colour == Colour.BLUE:
+            if col == 0: self.union(current, self.LEFT_BLUE)
+            if col == 10: self.union(current, self.RIGHT_BLUE)
             if self.find(self.LEFT_BLUE) == self.find(self.RIGHT_BLUE):
                 self.winner = Colour.BLUE
 
+    def play(self, row, col, colour):
+        if self.winner is not None:
+            return False
+            
+        if self.grid[row, col] != self.EMPTY:
+            return False
+
+        colour_int = self.RED_INT if colour == Colour.RED else self.BLUE_INT
+        self.grid[row, col] = colour_int
+        
+        if (row, col) in self.empty_spots:
+            self.empty_spots.remove((row, col))
+            
+        current = self._index(row, col)
+        hash_id = 0 if colour == Colour.RED else 1
+        self.hash ^= ZOBRIST_TABLE[row][col][hash_id]
+        self.hash ^= TURN_HASH
+        
+        for k in range(Tile.NEIGHBOUR_COUNT):
+            nr = row + Tile.I_DISPLACEMENTS[k]
+            nc = col + Tile.J_DISPLACEMENTS[k]
+            if 0 <= nr < 11 and 0 <= nc < 11:
+                if self.grid[nr, nc] == colour_int:
+                    neighbor = self._index(nr, nc)
+                    self.union(current, neighbor)
+
+        if colour == Colour.RED:
+            if row == 0: self.union(current, self.TOP_RED)
+            if row == 10: self.union(current, self.BOTTOM_RED)
+            if self.find(self.TOP_RED) == self.find(self.BOTTOM_RED):
+                self.winner = Colour.RED
+
+        elif colour == Colour.BLUE:
+            if col == 0: self.union(current, self.LEFT_BLUE)
+            if col == 10: self.union(current, self.RIGHT_BLUE)
+            if self.find(self.LEFT_BLUE) == self.find(self.RIGHT_BLUE):
+                self.winner = Colour.BLUE
+
+        self.turn = Colour.BLUE if self.turn == Colour.RED else Colour.RED
+        return True
+
     def get_legal_moves(self):
-       return list(self.empty_spots)
+        return list(self.empty_spots)
+
     def copy(self):
-        p_enum = Colour.RED if self.turn == self.RED_INT else Colour.BLUE
-        new_board = Board_Optimized(p_enum, self.size)
+        new_board = object.__new__(Board_Optimized)
+        new_board.turn = self.turn
         new_board.grid = np.copy(self.grid)
+        new_board.empty_spots = self.empty_spots.copy()
+        new_board.winner = self.winner
+        new_board._dsu_size = self._dsu_size
         new_board.parent = np.copy(self.parent)
         new_board.rank = np.copy(self.rank)
-        new_board.winner = self.winner
-        new_board.empty_spots = list(self.empty_spots)
+        new_board.TOP_RED = self.TOP_RED
+        new_board.BOTTOM_RED = self.BOTTOM_RED
+        new_board.LEFT_BLUE = self.LEFT_BLUE
+        new_board.RIGHT_BLUE = self.RIGHT_BLUE
         new_board.hash = self.hash
-        new_board.turn = self.turn
         return new_board
 
-    
+    def to_nn_input(self, player_perspective):
+        tensor = np.zeros((3, 11, 11), dtype=np.float32)
+        my_int = self.RED_INT if player_perspective == Colour.RED else self.BLUE_INT
+        opp_int = self.BLUE_INT if my_int == self.RED_INT else self.RED_INT
+
+        tensor[0] = (self.grid == my_int).astype(np.float32)
+        tensor[1] = (self.grid == opp_int).astype(np.float32)
+        
+        if player_perspective == Colour.BLUE:
+            tensor[2, :, :] = 1.0
+            
+        return tensor
+
+    def hash_value(self):
+        return self.hash
