@@ -1,23 +1,14 @@
 import math
 import time
 import random
-import numpy as np
-from src.AgentBase import AgentBase
-from src.Board import Board
 from src.Colour import Colour
+from src.AgentBase import AgentBase
 from src.Move import Move
+from src.Board import Board
 from agents.Group23.board_set import Board_Optimized
 
-class SearchParams:
-    def __init__(self):
-        self.fpu_reduction = 0.2
-        # UCT Exploration Constant (sqrt(2) is standard for UCT)
-        self.C = math.sqrt(2)
-        # RAVE Constant (Controls how much we trust RAVE vs Real stats)
-        self.rave_constant = 300 
-
 class Node:
-    __slots__ = ['parent', 'move', 'player', 'visits', 'wins',
+    __slots__ = ['parent', 'move', 'player', 'visits', 'wins', 
                  'rave_visits', 'rave_wins', 'children', 'allowed_moves']
 
     def __init__(self, parent=None, move=None, player=None):
@@ -37,177 +28,201 @@ class Node:
     def has_children(self):
         return len(self.children) > 0
 
-    def value(self):
-        if self.visits == 0:
-            return 0.0
-        return self.wins / self.visits
-
 class MCTS:
     def __init__(self):
-        self.params = SearchParams()
+        self._C = math.sqrt(2)
+        self._RAVE = 300
         self.root = Node(parent=None, move=None, player=None)
         self.transposition_table = {}
 
     def update_root(self, move):
         if move in self.root.children:
             self.root = self.root.children[move]
-            self.root.parent = None
         else:
             self.root = Node(parent=None, move=None, player=None)
-            self.transposition_table.clear()
+        self.root.parent = None
 
-    def selection(self, board, color, time_limit):
+    def search(self, board, color, time_limit):
         time_start = time.time()
         
+        random_randrange = random.randrange
+        
+        # 1. Initialize Root
         if self.root.allowed_moves is None:
-            self.root.allowed_moves = board.get_legal_moves()
+            self.root.allowed_moves = list(board.get_legal_moves())
             if board.hash not in self.transposition_table:
                 self.transposition_table[board.hash] = self.root
 
+        # Convention: Root player is the one who needs to move NOW
         if self.root.player is None:
             self.root.player = 1 if color == Colour.RED else 2
 
         while time.time() - time_start < time_limit:
             node = self.root
             board_copy = board.copy()
+            board_play = board_copy.play
             path = [node]
-            path_set = {id(node)} # Cycle detection
-            cycle_detected = False
-            
-            # Track moves for RAVE updates
             red_moves = set()
             blue_moves = set()
 
-            # 1. Selection (Hybrid RAVE + FPU)
-            while node.is_fully_expanded() and node.has_children():
-                node = self.child_selection(node)
-                
-                # Cycle Check
-                if id(node) in path_set:
-                    cycle_detected = True
+            # --- SELECTION ---
+            while node.has_children() and node.is_fully_expanded():
+                child = self.child_selection(node)
+                if child is None:
                     break
-                
+                node = child
                 path.append(node)
-                path_set.add(id(node))
-                
-                move_row, move_col = node.move
-                move_color = Colour.RED if node.player == 1 else Colour.BLUE
-                board_copy.play(move_row, move_col, move_color)
-                
-                if node.player == 1:
-                    red_moves.add(node.move)
+
+                # RE-PLAY LOGIC:
+                # 'node' is the state reached by 'node.move'.
+                # 'node.player' is the one to move NEXT.
+                # So 'node.move' was made by the PREVIOUS player (3 - node.player).
+                mv = node.move
+                prev_player = 3 - node.player 
+                move_color = Colour.RED if prev_player == 1 else Colour.BLUE
+                board_play(mv[0], mv[1], move_color)
+
+                if move_color == Colour.RED:
+                    red_moves.add(mv)
                 else:
-                    blue_moves.add(node.move)
+                    blue_moves.add(mv)
 
-            if cycle_detected:
-                continue
+                if board_copy.winner is not None:
+                    break
 
-            # 2. Expansion
-            if node.allowed_moves and board_copy.winner is None:
+            # --- EXPANSION ---
+            if board_copy.winner is None and node.allowed_moves:
+                # Pick move for CURRENT player (node.player)
+                moves_len = len(node.allowed_moves)
+                rand_idx = random_randrange(moves_len)
+                node.allowed_moves[rand_idx], node.allowed_moves[-1] = node.allowed_moves[-1], node.allowed_moves[rand_idx]
                 move_to_expand = node.allowed_moves.pop()
-                next_player = 1 if node.player is None and color == Colour.RED else (3 - (node.player or 2))
-                next_color = Colour.RED if next_player == 1 else Colour.BLUE
-                
-                board_copy.play(move_to_expand[0], move_to_expand[1], next_color)
-                board_hash = board_copy.hash
 
+                current_p = node.player
+                play_color = Colour.RED if current_p == 1 else Colour.BLUE
+                board_play(move_to_expand[0], move_to_expand[1], play_color)
+
+                if play_color == Colour.RED:
+                    red_moves.add(move_to_expand)
+                else:
+                    blue_moves.add(move_to_expand)
+
+                # The child node will be for the NEXT player
+                next_player = 3 - current_p
+                
+                board_hash = board_copy.hash
                 if board_hash in self.transposition_table:
-                    child_node = self.transposition_table[board_hash]
-                    if move_to_expand not in node.children:
-                        node.children[move_to_expand] = child_node
+                    candidate = self.transposition_table[board_hash]
+                    if candidate.parent is None:
+                        child_node = candidate
+                        child_node.parent = node
+                        child_node.move = move_to_expand
+                        child_node.player = next_player
+                    else:
+                        child_node = Node(parent=node, move=move_to_expand, player=next_player)
                 else:
                     child_node = Node(parent=node, move=move_to_expand, player=next_player)
-                    child_node.allowed_moves = board_copy.get_legal_moves()
                     self.transposition_table[board_hash] = child_node
-                    node.children[move_to_expand] = child_node
 
+                if child_node.allowed_moves is None:
+                    child_node.allowed_moves = list(board_copy.get_legal_moves())
+
+                node.children[move_to_expand] = child_node
                 node = child_node
                 path.append(node)
-                rollout_player = 2 if next_player == 1 else 1
+                
+                # Rollout starts with the player whose turn it is at the NEW node
+                rollout_player = next_player
             else:
-                rollout_player = 1 if (node.player is None and color == Colour.RED) else 3 - node.player
+                rollout_player = node.player
 
-            # 3. Rollout
+            # --- SIMULATION ---
             winner = self.rollout(board_copy, rollout_player, red_moves, blue_moves)
             
-            # 4. Backpropagation (RAVE)
+            # --- BACKPROPAGATION ---
             self.backpropagate(path, winner, red_moves, blue_moves)
 
         best_child = max(self.root.children.values(), key=lambda c: c.visits, default=None)
         if best_child is None:
-            return random.choice(board.get_legal_moves())
+            return random.choice(list(board.get_legal_moves()))
         return best_child.move
 
     def child_selection(self, node):
         best_score = -float('inf')
         best_node = None
         
-        # Avoid log(0)
-        log_visits = math.log(node.visits) if node.visits > 0 else 0
+        parent_visits = node.visits if node.visits > 0 else 1
+        log_parent = math.log(parent_visits)
         
-        # FPU Calculation
-        # Assume unvisited nodes are slightly worse than parent average
-        fpu_value = 0.0
-        if node.visits > 0:
-            fpu_value = node.value() - self.params.fpu_reduction
+        exploration_numerator = self._C * math.sqrt(log_parent)
+        rave_const = self._RAVE
 
         for child in node.children.values():
-            # HYBRID LOGIC:
             if child.visits == 0:
-                # FPU for unvisited: 
-                # We give it a score so it competes with visited nodes.
-                # We treat it as having "high uncertainty" (like UCT with n=1)
-                exploitation = fpu_value
-                exploration = self.params.C * math.sqrt(log_visits) # n=1 approx
-            else:
-                # RAVE Logic for visited
-                beta = math.sqrt(self.params.rave_constant / (3 * node.visits + self.params.rave_constant))
-                
-                rave_exploitation = child.rave_wins / child.rave_visits if child.rave_visits > 0 else 0
-                uct_exploitation = child.wins / child.visits
-                
-                exploitation = (1 - beta) * uct_exploitation + beta * rave_exploitation
-                exploration = self.params.C * math.sqrt(log_visits / child.visits)
-            
-            score = exploitation + exploration
-            
+                return child
+
+            q = child.wins / child.visits
+            amaf = (child.rave_wins / child.rave_visits) if child.rave_visits > 0 else 0.0
+
+            beta = rave_const / (rave_const + child.visits + 1e-9)
+            combined = (1.0 - beta) * q + beta * amaf
+
+            exploration = exploration_numerator / math.sqrt(1 + child.visits)
+            score = combined + exploration
+
             if score > best_score:
                 best_score = score
                 best_node = child
-        
+
         return best_node
 
     def rollout(self, board, next_player, red_moves, blue_moves):
         current_player = next_player
-        moves = board.get_legal_moves().copy()
-        random.shuffle(moves)
-        while moves and board.winner is None:
-            move = moves.pop()
+        sim_moves = list(board.get_legal_moves())
+        play_func = board.play_rollout
+        random_randrange = random.randrange
+        
+        while sim_moves and board.winner is None:
+            idx = random_randrange(len(sim_moves))
+            sim_moves[idx], sim_moves[-1] = sim_moves[-1], sim_moves[idx]
+            move = sim_moves.pop()
+            
             colour = Colour.RED if current_player == 1 else Colour.BLUE
-            board.play(move[0], move[1], colour)
+            play_func(move[0], move[1], colour)
+            
             if current_player == 1:
                 red_moves.add(move)
             else:
                 blue_moves.add(move)
             current_player = 3 - current_player
-        return board.winner
+
+        if board.winner == Colour.RED:
+            return 1
+        if board.winner == Colour.BLUE:
+            return 2
+        return 0
 
     def backpropagate(self, path, winner, red_moves, blue_moves):
-        moves_by_color = {Colour.RED: red_moves, Colour.BLUE: blue_moves}
-        
         for node in reversed(path):
-            current_player = Colour.RED if node.player == 1 else Colour.BLUE
-            reward = 1 if winner == current_player else 0 # 1 or 0 for UCT/RAVE
-            
             node.visits += 1
-            node.wins += reward
             
-            # RAVE Update
-            for child in node.children.values():
-                child_color = Colour.RED if child.player == 1 else Colour.BLUE
-                if child.move in moves_by_color[child_color]:
+            # UCT: Did the move leading to 'node' result in a win?
+            # The move was made by (3 - node.player).
+            if winner != 0 and (3 - node.player) == winner:
+                node.wins += 1
+            
+            # RAVE: Update children of 'node'.
+            # These children represent moves made by 'node.player'.
+            if node.player == 1:
+                current_moves = red_moves
+            else:
+                current_moves = blue_moves
+
+            for mv in current_moves:
+                if mv in node.children:
+                    child = node.children[mv]
                     child.rave_visits += 1
-                    if winner == child_color:
+                    if winner == node.player:
                         child.rave_wins += 1
 
 class Agent(AgentBase):
@@ -235,7 +250,12 @@ class Agent(AgentBase):
             self.mcts.update_root(opp_move_tuple)
 
         optimized_board = Board_Optimized.from_game_board(board, self.colour)
-        row, col = self.mcts.selection(optimized_board, self.colour, time_limit=8.5)
+
+        legal_moves = list(optimized_board.get_legal_moves())
+        if len(legal_moves) == 1:
+            return Move(legal_moves[0][0], legal_moves[0][1])
+
+        row, col = self.mcts.search(optimized_board, self.colour, time_limit=8.5)
         my_move_tuple = (row, col)
         self.mcts.update_root(my_move_tuple)
         return Move(row, col)
