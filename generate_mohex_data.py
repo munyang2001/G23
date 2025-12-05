@@ -1,120 +1,105 @@
-import subprocess
-import time
+import sys
 import os
-import torch
-import numpy as np
+import random
+import time
+import subprocess
+
+# --- 依赖检查 ---
+try:
+    import torch
+    from torch.utils.data import Dataset, DataLoader
+except ImportError:
+    print("错误: 未检测到 PyTorch 库。请运行: pip install torch")
+    sys.exit(1)
+
 from src.Board import Board
 from src.Colour import Colour
+# 导入队友的 MCTS Agent (你的老师)
+from agents.MCTSAgent.MCTSAgent import MCTSAgent
+# 导入你的神经网络输入编码器
 from agents.PolicyNetwork.Board2Tensor import encode_board_to_tensor
 
-# --- 配置区 ---
-# 如果你有编译好的 mohex，填入路径。如果没有，就用你们组的 MCTS。
-# 例如: ENGINE_CMD = ["agents/MCTSAgent/mcts-hex"] 
-# 或者 MoHex: ENGINE_CMD = ["/path/to/mohex", "--config", "config.txt"]
-ENGINE_CMD = ["python3", "Hex.py", "--agent", "MCTSAgent"] # 这是一个占位符，需要替换为真实的启动命令
+# --- 配置 ---
+NUM_GAMES = 200        # 生成多少局数据 (MCTS 较慢，根据时间调整)
+OUTPUT_FILE = "data/mcts_games.pt"
 
-# 真实场景下，如果 mcts-hex 是编译好的二进制文件：
-# ENGINE_CMD = ["./agents/MCTSAgent/mcts-hex"] 
+# --- 1. 确保二进制文件有权限 ---
+def ensure_executable():
+    path = "./agents/Group23/NaiveAgent"
+    if os.path.exists(path):
+        os.chmod(path, 0o755) # 赋予执行权限
+        print(f"[系统] 已赋予执行权限: {path}")
+    else:
+        print(f"[警告] 找不到引擎文件 {path}，请确保已 Pull 队友代码。")
 
-OUTPUT_FILE = "data/mohex_games.pt"
-NUM_GAMES = 100
-BOARD_SIZE = 11
-
-def send_cmd(proc, command):
-    """向 GTP 引擎发送命令并获取回复"""
-    proc.stdin.write(f"{command}\n")
-    proc.stdin.flush()
-    response = ""
-    while True:
-        line = proc.stdout.readline()
-        if line.strip() == "":
-            if response: break # 空行表示回复结束
-        else:
-            response += line
-    return response.strip()
-
-def gtp_to_coords(gtp_move):
-    """将 GTP 坐标 (e.g., 'C5') 转换为 (x, y)"""
-    gtp_move = gtp_move.upper()
-    if gtp_move == "SWAP": return (-1, -1)
-    if gtp_move == "RESIGN": return None
+# --- 2. 生成数据 ---
+def generate_data():
+    ensure_executable()
     
-    col_char = gtp_move[0]
-    row_str = gtp_move[1:]
-    
-    # GTP: A=0, B=1, C=2... (跳过 I)
-    col = ord(col_char) - ord('A')
-    if col_char > 'I': col -= 1
-    
-    row = int(row_str) - 1
-    return (col, row)
-
-def run_self_play():
+    print(f"--- 开始生成数据: {NUM_GAMES} 局 (MCTS vs MCTS) ---")
     data = []
-    print(f"启动引擎: {ENGINE_CMD}")
     
-    # 启动两个进程
-    try:
-        p1 = subprocess.Popen(ENGINE_CMD, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-        p2 = subprocess.Popen(ENGINE_CMD, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-    except FileNotFoundError:
-        print("错误: 找不到引擎文件。请修改 ENGINE_CMD 路径。")
-        return
-
-    # 初始化
-    send_cmd(p1, f"boardsize {BOARD_SIZE}")
-    send_cmd(p2, f"boardsize {BOARD_SIZE}")
-
+    start_time = time.time()
+    
     for i in range(NUM_GAMES):
-        print(f"正在进行第 {i+1}/{NUM_GAMES} 局对局...")
-        send_cmd(p1, "clear_board")
-        send_cmd(p2, "clear_board")
-        
-        board = Board(BOARD_SIZE)
-        curr_player = p1
+        try:
+            # 初始化 MCTS 引擎
+            # 注意：如果 MCTS 内部有状态残留，每局重新初始化更安全
+            agent_red = MCTSAgent(Colour.RED)
+            agent_blue = MCTSAgent(Colour.BLUE)
+        except Exception as e:
+            print(f"[错误] MCTS 启动失败: {e}")
+            print("请检查是否在 Docker 内运行，且 mcts-hex 路径正确。")
+            return
+
+        board = Board(11)
+        turn = 1
         curr_colour = Colour.RED
-        game_moves = []
         
         while True:
-            # 1. 请求当前引擎走棋
-            # GTP 命令: genmove red/blue
-            color_str = "red" if curr_colour == Colour.RED else "blue"
-            response = send_cmd(curr_player, f"genmove {color_str}")
+            # 1. 获取 MCTS 的走法 (Teacher's Move)
+            if curr_colour == Colour.RED:
+                move = agent_red.make_move(turn, board, None)
+            else:
+                move = agent_blue.make_move(turn, board, None)
             
-            # 解析回复 (通常是 "= C5" 格式)
-            move_str = response.split()[-1]
-            coords = gtp_to_coords(move_str)
-            
-            if coords is None: # RESIGN
-                break
-                
-            # 2. 记录数据 (如果是正常走棋)
-            if coords != (-1, -1):
-                # 记录 (当前局面 Tensor, 这一步 Move)
+            # 2. 记录数据 (忽略 Swap)
+            if move.x != -1:
+                # 输入: 当前棋盘状态 (Tensor)
+                # squeeze(0) 去掉 batch 维度，变成 (C, H, W)
                 tensor = encode_board_to_tensor(board, curr_colour).squeeze(0)
-                target = coords[0] * BOARD_SIZE + coords[1]
+                
+                # 标签: MCTS 选择的这一步 (Index 0-120)
+                target = move.x * 11 + move.y
+                
                 data.append((tensor, target))
                 
-                # 更新 Python 端棋盘
-                board.set_tile_colour(coords[0], coords[1], curr_colour)
+                # 执行移动
+                board.set_tile_colour(move.x, move.y, curr_colour)
             
-            # 3. 告诉另一个引擎这一步
-            other_player = p2 if curr_player == p1 else p1
-            send_cmd(other_player, f"play {color_str} {move_str}")
-            
-            # 4. 切换
-            curr_player = other_player
+            # 3. 检查结束
+            # 简单检查：如果棋盘满了或步数过多
+            # MCTS Agent 内部通常会处理认输，但这里我们只负责跑流程
             curr_colour = Colour.opposite(curr_colour)
-            
-            if len(game_moves) > BOARD_SIZE * BOARD_SIZE: break
+            turn += 1
+            if turn > 121: break
+        
+        # 结束一局，清理进程
+        if hasattr(agent_red, 'agent_process'): agent_red.agent_process.terminate()
+        if hasattr(agent_blue, 'agent_process'): agent_blue.agent_process.terminate()
 
-    # 保存数据
-    if not os.path.exists("data"): os.makedirs("data")
+        # 打印进度
+        if (i + 1) % 5 == 0:
+            elapsed = time.time() - start_time
+            avg = elapsed / (i + 1)
+            eta = avg * (NUM_GAMES - i - 1)
+            print(f"进度: {i + 1}/{NUM_GAMES} 局 | 样本数: {len(data)} | 耗时: {elapsed:.1f}s | ETA: {eta/60:.1f}min")
+
+    # 保存数据到文件
+    if not os.path.exists("data"):
+        os.makedirs("data")
     torch.save(data, OUTPUT_FILE)
-    print(f"数据已保存至 {OUTPUT_FILE}，共 {len(data)} 个样本。")
-    
-    p1.terminate()
-    p2.terminate()
+    print(f"--- 数据生成完毕，已保存至 {OUTPUT_FILE} ---")
 
 if __name__ == "__main__":
-    run_self_play()
+    generate_data()
