@@ -23,7 +23,7 @@ from agents.Group23.board_set import Board_Optimized
 from agents.PolicyNetwork.Board2Tensor import encode_board_to_tensor
 
 # --- 配置 ---
-NUM_GAMES = 200         # 生成局数
+NUM_GAMES = 50         # 生成局数
 MOVE_TIME_LIMIT = 0.5   # 每步思考时间 (秒)。原版是8.5s，这里为了生成速度设为0.5s
 OUTPUT_FILE = "data/mcts_games.pt"
 
@@ -33,7 +33,8 @@ class FastDataAgent(Group23Agent):
     继承你们的 MCTS Agent，但允许修改思考时间，以便快速生成数据。
     """
     def make_move(self, turn: int, board: Board, opp_move: Move | None) -> Move:
-        # 1. 处理 Swap 逻辑 (照搬原逻辑)
+        # 1. 处理 Swap 逻辑
+        
         if turn == 2:
             opp_r, opp_c = -1, -1
             for r in range(self._board_size):
