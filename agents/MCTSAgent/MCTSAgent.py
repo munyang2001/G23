@@ -1,5 +1,4 @@
 import subprocess
-
 from src.Colour import Colour
 from src.AgentBase import AgentBase
 from src.Move import Move
@@ -9,7 +8,10 @@ from src.Game import logger
 class MCTSAgent(AgentBase):
     def __init__(self, colour: Colour):
         super().__init__(colour)
+        self._start_process()
 
+    def _start_process(self):
+        """Starts the external MCTS agent subprocess."""
         self.agent_process = subprocess.Popen(
             ["./agents/MCTSAgent/mcts-hex"],
             stdout=subprocess.PIPE,
@@ -20,32 +22,14 @@ class MCTSAgent(AgentBase):
         )
 
     def make_move(self, turn: int, board: Board, opp_move: Move | None) -> Move:
-        """The game engine will call this method to request a move from the agent.
-        If the agent is to make the first move, opp_move will be None.
-        If the opponent has made a move, opp_move will contain the opponent's move.
-        If the opponent has made a swap move, opp_move will contain a Move object with x=-1 and y=-1,
-        the game engine will also change your colour to the opponent colour.
-
-        Args:
-            turn (int): The current turn
-            board (Board): The current board state
-            opp_move (Move | None): The opponent's last move
-
-        Returns:
-            Move: The agent's move
-        """
-
+        """Requests a move from the MCTS subprocess based on the current board state."""
         rows = board.tiles
         board_strings = []
         for row in rows:
             row_string = ""
             for tile in row:
                 colour = tile.colour
-                if colour is None:
-                    t = "0"
-                else:
-                    t = colour.get_char()
-                row_string += t
+                row_string += "0" if colour is None else colour.get_char()
             board_strings.append(row_string)
         board_string = ",".join(board_strings)
 
@@ -56,10 +40,25 @@ class MCTSAgent(AgentBase):
         else:
             command = f"CHANGE;{opp_move.x},{opp_move.y};{board_string};{turn};"
 
+        # Send command to subprocess
         self.agent_process.stdin.write(command + "\n")
         self.agent_process.stdin.flush()
 
+        # Read response and convert to Move
         response = self.agent_process.stdout.readline().rstrip()
-        # assuming the response takes the form "x,y" with -1,-1 if the agent wants to make a swap move
         x, y = map(int, response.split(","))
         return Move(x, y)
+
+    # -------------------------------
+    # Deepcopy support
+    # -------------------------------
+    def __getstate__(self):
+        """Remove the unpicklable subprocess before deepcopy."""
+        state = self.__dict__.copy()
+        state.pop("agent_process", None)
+        return state
+
+    def __setstate__(self, state):
+        """Restore the state after deepcopy and restart subprocess."""
+        self.__dict__.update(state)
+        self._start_process()

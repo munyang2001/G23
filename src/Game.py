@@ -148,6 +148,7 @@ class Game:
             start = time()
             m = playerAgent.make_move(self.turn, playerBoard, opponentMove)
             end = time()
+            
 
             assert boardCopy == self.board, "Board was modified, Possible cheating!"
             assert turnCopy == self.turn, "Turn was modified, Possible cheating!"
@@ -163,6 +164,7 @@ class Game:
             logger.info(f"Player {currentPlayer.name}; Move: {self.current_player}{m}")
             if currentPlayer.move_time > Game.MAXIMUM_TIME:
                 logger.info(f"Player {currentPlayer.name} timed out")
+                print("Your game ended due to being over 3 mins")
                 endState = EndState.TIMEOUT
                 break
             if self.is_valid_move(m, self.turn, self.board):

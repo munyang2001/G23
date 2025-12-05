@@ -38,29 +38,34 @@ class MCTS:
     def update_root(self, move):
         if move in self.root.children:
             self.root = self.root.children[move]
-            self.root.parent = None
         else:
             self.root = Node(parent=None, move=None, player=None)
         self.root.parent = None
 
     def search(self, board, color, time_limit):
         time_start = time.time()
-
+        
+        random_randrange = random.randrange
+        
+        # 1. Initialize Root
         if self.root.allowed_moves is None:
             self.root.allowed_moves = list(board.get_legal_moves())
             if board.hash not in self.transposition_table:
                 self.transposition_table[board.hash] = self.root
 
+        # Convention: Root player is the one who needs to move NOW
         if self.root.player is None:
-            self.root.player = 2 if color == Colour.RED else 1
+            self.root.player = 1 if color == Colour.RED else 2
 
         while time.time() - time_start < time_limit:
             node = self.root
             board_copy = board.copy()
+            board_play = board_copy.play
             path = [node]
             red_moves = set()
             blue_moves = set()
 
+            # --- SELECTION ---
             while node.has_children() and node.is_fully_expanded():
                 child = self.child_selection(node)
                 if child is None:
@@ -68,9 +73,14 @@ class MCTS:
                 node = child
                 path.append(node)
 
+                # RE-PLAY LOGIC:
+                # 'node' is the state reached by 'node.move'.
+                # 'node.player' is the one to move NEXT.
+                # So 'node.move' was made by the PREVIOUS player (3 - node.player).
                 mv = node.move
-                move_color = Colour.RED if node.player == 1 else Colour.BLUE
-                board_copy.play(mv[0], mv[1], move_color)
+                prev_player = 3 - node.player 
+                move_color = Colour.RED if prev_player == 1 else Colour.BLUE
+                board_play(mv[0], mv[1], move_color)
 
                 if move_color == Colour.RED:
                     red_moves.add(mv)
@@ -80,25 +90,27 @@ class MCTS:
                 if board_copy.winner is not None:
                     break
 
+            # --- EXPANSION ---
             if board_copy.winner is None and node.allowed_moves:
+                # Pick move for CURRENT player (node.player)
+                moves_len = len(node.allowed_moves)
+                rand_idx = random_randrange(moves_len)
+                node.allowed_moves[rand_idx], node.allowed_moves[-1] = node.allowed_moves[-1], node.allowed_moves[rand_idx]
                 move_to_expand = node.allowed_moves.pop()
 
-                if node.player is None:
-                    next_player = 1 if color == Colour.RED else 2
-                else:
-                    next_player = 3 - node.player
+                current_p = node.player
+                play_color = Colour.RED if current_p == 1 else Colour.BLUE
+                board_play(move_to_expand[0], move_to_expand[1], play_color)
 
-                next_color = Colour.RED if next_player == 1 else Colour.BLUE
-
-                board_copy.play(move_to_expand[0], move_to_expand[1], next_color)
-
-                if next_color == Colour.RED:
+                if play_color == Colour.RED:
                     red_moves.add(move_to_expand)
                 else:
                     blue_moves.add(move_to_expand)
 
+                # The child node will be for the NEXT player
+                next_player = 3 - current_p
+                
                 board_hash = board_copy.hash
-
                 if board_hash in self.transposition_table:
                     candidate = self.transposition_table[board_hash]
                     if candidate.parent is None:
@@ -118,14 +130,16 @@ class MCTS:
                 node.children[move_to_expand] = child_node
                 node = child_node
                 path.append(node)
-                rollout_player = 3 - next_player
+                
+                # Rollout starts with the player whose turn it is at the NEW node
+                rollout_player = next_player
             else:
-                if node.player is None:
-                    rollout_player = 1 if color == Colour.RED else 2
-                else:
-                    rollout_player = 3 - node.player
+                rollout_player = node.player
 
+            # --- SIMULATION ---
             winner = self.rollout(board_copy, rollout_player, red_moves, blue_moves)
+            
+            # --- BACKPROPAGATION ---
             self.backpropagate(path, winner, red_moves, blue_moves)
 
         best_child = max(self.root.children.values(), key=lambda c: c.visits, default=None)
@@ -136,8 +150,12 @@ class MCTS:
     def child_selection(self, node):
         best_score = -float('inf')
         best_node = None
-        parent_N = node.visits if node.visits > 0 else 1
-        log_parent = math.log(parent_N)
+        
+        parent_visits = node.visits if node.visits > 0 else 1
+        log_parent = math.log(parent_visits)
+        
+        exploration_numerator = self._C * math.sqrt(log_parent)
+        rave_const = self._RAVE
 
         for child in node.children.values():
             if child.visits == 0:
@@ -146,10 +164,10 @@ class MCTS:
             q = child.wins / child.visits
             amaf = (child.rave_wins / child.rave_visits) if child.rave_visits > 0 else 0.0
 
-            beta = self._RAVE / (self._RAVE + child.visits + 1e-9)
+            beta = rave_const / (rave_const + child.visits + 1e-9)
             combined = (1.0 - beta) * q + beta * amaf
 
-            exploration = self._C * math.sqrt(log_parent / (1 + child.visits))
+            exploration = exploration_numerator / math.sqrt(1 + child.visits)
             score = combined + exploration
 
             if score > best_score:
@@ -161,11 +179,17 @@ class MCTS:
     def rollout(self, board, next_player, red_moves, blue_moves):
         current_player = next_player
         sim_moves = list(board.get_legal_moves())
-        random.shuffle(sim_moves)
+        play_func = board.play_rollout
+        random_randrange = random.randrange
+        
         while sim_moves and board.winner is None:
+            idx = random_randrange(len(sim_moves))
+            sim_moves[idx], sim_moves[-1] = sim_moves[-1], sim_moves[idx]
             move = sim_moves.pop()
+            
             colour = Colour.RED if current_player == 1 else Colour.BLUE
-            board.play(move[0], move[1], colour)
+            play_func(move[0], move[1], colour)
+            
             if current_player == 1:
                 red_moves.add(move)
             else:
@@ -181,19 +205,24 @@ class MCTS:
     def backpropagate(self, path, winner, red_moves, blue_moves):
         for node in reversed(path):
             node.visits += 1
-            if winner != 0 and node.player == winner:
+            
+            # UCT: Did the move leading to 'node' result in a win?
+            # The move was made by (3 - node.player).
+            if winner != 0 and (3 - node.player) == winner:
                 node.wins += 1
+            
+            # RAVE: Update children of 'node'.
+            # These children represent moves made by 'node.player'.
+            if node.player == 1:
+                current_moves = red_moves
+            else:
+                current_moves = blue_moves
 
-            for mv, child in node.children.items():
-                if mv is None:
-                    continue
-                if winner == 1:
-                    if mv in red_moves:
-                        child.rave_visits += 1
-                        child.rave_wins += 1
-                elif winner == 2:
-                    if mv in blue_moves:
-                        child.rave_visits += 1
+            for mv in current_moves:
+                if mv in node.children:
+                    child = node.children[mv]
+                    child.rave_visits += 1
+                    if winner == node.player:
                         child.rave_wins += 1
 
 class Agent(AgentBase):
@@ -221,6 +250,11 @@ class Agent(AgentBase):
             self.mcts.update_root(opp_move_tuple)
 
         optimized_board = Board_Optimized.from_game_board(board, self.colour)
+
+        legal_moves = list(optimized_board.get_legal_moves())
+        if len(legal_moves) == 1:
+            return Move(legal_moves[0][0], legal_moves[0][1])
+
         row, col = self.mcts.search(optimized_board, self.colour, time_limit=8.5)
         my_move_tuple = (row, col)
         self.mcts.update_root(my_move_tuple)

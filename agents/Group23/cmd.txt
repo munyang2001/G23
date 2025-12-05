@@ -1,1 +1,5 @@
-agents.Group23.DeepScout DeepScout
+<<<<<<< HEAD
+agents.Group23.NaiveAgent Agent
+=======
+agents.Group23.NaiveAgent Agent
+>>>>>>> origin/Kanav
